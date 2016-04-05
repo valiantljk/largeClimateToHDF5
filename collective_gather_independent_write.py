@@ -25,7 +25,7 @@ rank = MPI.COMM_WORLD.Get_rank()
 mpi_info = MPI.Info.Create()
 numProcs = MPI.COMM_WORLD.Get_size()
 
-numProcessesPerNode = 5
+numProcessesPerNode =8
 
 procslist = np.arange(numProcs)
 
@@ -70,21 +70,19 @@ reportbarrier("Finished opening all files")
 #varnames = ["T"]
 varnames = [varname]
 numvars = len(varnames)
-numvars = 1
 numtimeslices = 8
-numlevels = 15
-#numlevels = 30
+numlevels = 30
 numlats = 768
 numlongs = 1152
-numlevdivs = 64
+numlevdivs = 128
 flattenedlength = numlevels*numlats*numlongs
 numRows = flattenedlength*numvars
 numCols = len(filelist)*numtimeslices
 rowChunkSize = numlats*numlongs/numlevdivs
 
 numWriters = numlevdivs 
-coloutname = "superstrided/colfilenames" 
-foutname = "superstrided/" + varname
+coloutname = "colfilenames" 
+foutname = varname
 assert ((numlats * numlongs) % numlevdivs == 0)
 
 report("Creating files and datasets")
@@ -98,21 +96,22 @@ if rank == 0:
        np.save(colfout, np.array(colnames))
 
 #Open the output files on the writer processes and create the datasets that will contain the rows for that writer
-for chunkidx in np.arange(numWriters):
-    if rank == chunkidxToWriter(chunkidx):
+#for chunkidx in np.arange(numWriters):
+#    if rank == chunkidxToWriter(chunkidx):
         #Ask for alignment with the stripe size (use lfs getstripe on target directory to determine)
-        propfaid = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
-        propfaid.set_alignment(1024, 1024*1024)
-        #propfaid.set_sieve_buf_size(numCols*8*20) # be able to store 20 rows worth of data
-        fid = h5py.h5f.create(join(jialinpath, foutname + str(chunkidx) + ".hdf5"), flags=h5py.h5f.ACC_TRUNC, fapl=propfaid)
-        fout = h5py.File(fid)
+propfaid = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+propfaid.set_alignment(1024, 1024*1024)
+        #propfaid.set_sieve_buf_size(numCols*8*20) # be able to store 20 rows worth of dat
+#fid = h5py.h5f.create(join(jialinpath, foutname + str(chunkidx) + ".hdf5"), flags=h5py.h5f.ACC_TRUNC, fapl=propfaid)
+fid = h5py.h5f.create(join(jialinpath, foutname + ".h5"), flags=h5py.h5f.ACC_TRUNC, fapl=propfaid)
+fout = h5py.File(fid)
 
         # Don't use filling 
-        spaceid = h5py.h5s.create_simple((numvars*numlevels*rowChunkSize, numCols))
-        plist = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
-        plist.set_fill_time(h5py.h5d.FILL_TIME_NEVER)
-        datasetid = h5py.h5d.create(fout.id, "rows", h5py.h5t.NATIVE_DOUBLE, spaceid, plist)
-        rows = h5py.Dataset(datasetid)
+spaceid = h5py.h5s.create_simple((numvars*numlevels*numlats*numlongs, numCols))
+plist = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+plist.set_fill_time(h5py.h5d.FILL_TIME_NEVER)
+datasetid = h5py.h5d.create(fout.id, "rows", h5py.h5t.NATIVE_DOUBLE, spaceid, plist)
+rows = h5py.Dataset(datasetid)
 
 reportbarrier("Finished creating files and datasets")
 
@@ -121,7 +120,8 @@ curlevdata = np.empty((numlats*numlongs, localcolumncount), \
         dtype=np.float32)
 chunktotransfer = np.empty((rowChunkSize*localcolumncount,), dtype=np.float32)
 
-if rank in map(chunkidxToWriter, np.arange(numWriters)):
+listwriter = map(chunkidxToWriter, np.arange(numWriters))
+if rank in listwriter:
     collectedchunk = np.ascontiguousarray(np.empty((numCols*rowChunkSize,), \
             dtype=np.float32))
     chunktowrite = np.ascontiguousarray(np.empty((rowChunkSize, numCols), \
@@ -130,7 +130,7 @@ else:
     collectedchunk = None
 curlevdatatemp=np.ascontiguousarray(np.zeros((numlats*numlongs*numtimeslices), \
             dtype=np.float32))
-currowoffset = 0
+#currowoffset = 0
 for (varidx,curvar) in enumerate(varnames): 
     reportbarrier("Writing variable %d/%d: %s" % (varidx + 1, numvars, curvar))
 
@@ -167,7 +167,7 @@ for (varidx,curvar) in enumerate(varnames):
             if rank == chunkidxToWriter(chunkidx):
                 # reshape the collected chunk to the chunk to be written out, of size
                 # rowChunkSize by numCols
-		print "current rank writer is:%d"%rank
+		#print "current rank writer is:%d"%rank
                 for processnum in np.arange(numProcs):
                     startcol = processnum*localcolumncount
                     endcol = (processnum+1)*localcolumncount
@@ -176,8 +176,11 @@ for (varidx,curvar) in enumerate(varnames):
                     chunktowrite[:, startcol:endcol] = np.reshape(collectedchunk[startidx:endidx], \
                             (rowChunkSize, localcolumncount))
 		#chunktowrite=np.reshape(collectedchunk,(rowChunkSize,numCols))
-                rows[currowoffset : (currowoffset + rowChunkSize)] = chunktowrite
-                currowoffset = currowoffset + rowChunkSize
+                #rows[currowoffset : (currowoffset + rowChunkSize)] = chunktowrite
+		start_rows = varidx*numlevels*numlats*numlongs+curlev*numlats*numlongs+rowChunkSize*listwriter.index(rank)
+		end_rows = start_rows+rowChunkSize
+		rows[start_rows:end_rows] = chunktowrite
+                #currowoffset = currowoffset + rowChunkSize
         reportbarrier("Done writing")
 
 for fh in myhandles:
